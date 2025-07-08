@@ -3,9 +3,14 @@ import './App.css';
 
 interface Message {
   id: string;
-  type: 'user' | 'ai' | 'system';
+  type: 'user' | 'ai' | 'system' | 'screenshot' | 'url';
   content: string;
   timestamp: Date;
+  metadata?: {
+    screenshotData?: string;
+    url?: string;
+    contentType?: 'website' | 'video';
+  };
 }
 
 interface ScreenshotData {
@@ -17,7 +22,6 @@ interface ScreenshotData {
 function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
-  const [urlInput, setUrlInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [windowState, setWindowState] = useState({
     isExpanded: false,
@@ -25,7 +29,6 @@ function App() {
     stealthMode: false
   });
   const [screenshots, setScreenshots] = useState<ScreenshotData[]>([]);
-  const [activeTab, setActiveTab] = useState<'chat' | 'screenshot' | 'content'>('chat');
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'checking'>('checking');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -33,7 +36,13 @@ function App() {
 
   useEffect(() => {
     const addSystemMessage = (content: string) => {
-      addMessage('system', content);
+      const message: Message = {
+        id: Date.now().toString(),
+        type: 'system',
+        content,
+        timestamp: new Date()
+      };
+      setMessages(prev => [...prev, message]);
     };
 
     // Load initial window state
@@ -42,7 +51,8 @@ function App() {
     // Set up event listeners
     window.electronAPI.onScreenshotCaptured((data: ScreenshotData) => {
       setScreenshots(prev => [...prev, data]);
-      addSystemMessage(`Screenshot captured: ${new Date(data.timestamp).toLocaleTimeString()}`);
+      // Show a subtle notification instead of a system message
+      addSystemMessage(`📸 Screenshot captured (${new Date(data.timestamp).toLocaleTimeString()}) - Ask me about it!`);
     });
 
     window.electronAPI.onScreenshotsCleared(() => {
@@ -59,7 +69,16 @@ function App() {
     });
 
     // Initial welcome message
-    addSystemMessage('AI Assistant Pro initialized. Use Ctrl+H for screenshots, or interact directly with the interface.');
+    addSystemMessage(`🚀 AI Assistant Pro initialized!
+
+📋 How to use:
+• 📸 Capture: Ctrl+H or click Screenshot button (silent capture)
+• � Analyze: Ask "what do you see?" or "analyze this screenshot"
+• 🌐 URLs: Paste any YouTube/website URL for analysis
+• � Context: I remember our conversation and screenshots
+• 🗑️ Clear: Ctrl+R to clear screenshots
+
+Just chat naturally - I'll help you with screenshots, videos, and more!`);
 
     return () => {
       // Cleanup listeners
@@ -87,18 +106,53 @@ function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  const addMessage = (type: 'user' | 'ai' | 'system', content: string) => {
+  const addMessage = (type: 'user' | 'ai' | 'system' | 'screenshot' | 'url', content: string, metadata?: Message['metadata']) => {
     const message: Message = {
       id: Date.now().toString(),
       type,
       content,
-      timestamp: new Date()
+      timestamp: new Date(),
+      metadata
     };
-    setMessages(prev => [...prev, message]);
+    setMessages(prev => {
+      const updated = [...prev, message];
+      return updated;
+    });
   };
 
   const addSystemMessage = (content: string) => {
     addMessage('system', content);
+  };
+
+  const buildChatContext = (): string => {
+    let context = '';
+
+    // Add recent conversation context
+    if (messages.length > 0) {
+      const recentMessages = messages.slice(-5); // Last 5 messages for context
+      context += 'Recent conversation context:\n';
+      recentMessages.forEach(msg => {
+        if (msg.type !== 'system') {
+          context += `${msg.type}: ${msg.content}\n`;
+        }
+      });
+      context += '\n';
+    }
+
+    // Add screenshot context
+    if (screenshots.length > 0) {
+      context += `Available screenshots: ${screenshots.length} screenshots captured. `;
+      context += `Latest screenshot taken at: ${new Date(screenshots[screenshots.length - 1].timestamp).toLocaleString()}.\n`;
+      context += `The user can reference these screenshots in their questions.\n`;
+    }
+
+    // Add URL context from recent messages
+    const urlMessages = messages.filter(msg => msg.type === 'url').slice(-3);
+    if (urlMessages.length > 0) {
+      context += `Recently analyzed URLs: ${urlMessages.map(msg => msg.metadata?.url).join(', ')}\n`;
+    }
+
+    return context;
   };
 
   const handleSendMessage = async () => {
@@ -106,17 +160,43 @@ function App() {
 
     const userMessage = inputValue.trim();
     setInputValue('');
+
+    // Check if this is a URL
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    const urls = userMessage.match(urlRegex);
+
+    if (urls && urls.length > 0) {
+      // Handle URL analysis
+      await handleAnalyzeUrl(urls[0], userMessage);
+      return;
+    }
+
     addMessage('user', userMessage);
     setIsLoading(true);
 
     try {
-      // Get context from recent screenshots if available
-      const context = screenshots.length > 0
-        ? `Recent screenshots captured: ${screenshots.length} screenshots available for analysis.`
-        : undefined;
+      // Check if the message is asking about screenshots
+      const askingAboutScreenshots = userMessage.toLowerCase().includes('screenshot') || 
+                                   userMessage.toLowerCase().includes('image') ||
+                                   userMessage.toLowerCase().includes('see') ||
+                                   userMessage.toLowerCase().includes('analyze') ||
+                                   userMessage.toLowerCase().includes('look');
 
-      const response = await window.electronAPI.chatWithAI(userMessage, context);
-      addMessage('ai', response);
+      if (screenshots.length > 0 && askingAboutScreenshots) {
+        // If asking about screenshots, analyze the latest one
+        const latestScreenshot = screenshots[screenshots.length - 1];
+        addMessage('screenshot', 'Analyzing screenshot...', {
+          screenshotData: latestScreenshot.dataURL
+        });
+
+        const response = await window.electronAPI.analyzeScreenshot(latestScreenshot.dataURL);
+        addMessage('ai', response);
+      } else {
+        // Regular chat with context
+        const context = buildChatContext();
+        const response = await window.electronAPI.chatWithAI(userMessage, context);
+        addMessage('ai', response);
+      }
     } catch (error) {
       addMessage('ai', `Error: ${error instanceof Error ? error.message : 'Unknown error occurred'}`);
     } finally {
@@ -125,13 +205,11 @@ function App() {
   };
 
   const handleTakeScreenshot = async () => {
-    setIsLoading(true);
     try {
       await window.electronAPI.takeScreenshot();
+      // Don't add any message here - just capture silently
     } catch (error) {
       addSystemMessage(`Screenshot error: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    } finally {
-      setIsLoading(false);
     }
   };
 
@@ -144,7 +222,9 @@ function App() {
     setIsLoading(true);
     try {
       const latestScreenshot = screenshots[screenshots.length - 1];
-      addMessage('user', 'Analyze latest screenshot');
+      addMessage('screenshot', 'Analyzing latest screenshot...', {
+        screenshotData: latestScreenshot.dataURL
+      });
 
       const response = await window.electronAPI.analyzeScreenshot(latestScreenshot.dataURL);
       addMessage('ai', response);
@@ -155,12 +235,14 @@ function App() {
     }
   };
 
-  const handleAnalyzeUrl = async () => {
-    if (!urlInput.trim() || isLoading) return;
-
-    const url = urlInput.trim();
+  const handleAnalyzeUrl = async (url: string, originalMessage?: string) => {
     setIsLoading(true);
-    addMessage('user', `Analyze: ${url}`);
+
+    if (originalMessage) {
+      addMessage('user', originalMessage);
+    }
+
+    addMessage('url', `🔍 Analyzing: ${url}`, { url });
 
     try {
       // Determine if it's a video URL or website
@@ -174,17 +256,16 @@ function App() {
         const videoInfo = await window.electronAPI.extractVideoInfo(url);
         content = `Title: ${videoInfo.title}\n\nDescription: ${videoInfo.description}`;
         contentType = 'video';
-        addSystemMessage(`Video info extracted: ${videoInfo.title}`);
+        addSystemMessage(`✅ Video info extracted: ${videoInfo.title}`);
       } else {
         content = await window.electronAPI.extractWebsiteContent(url);
         contentType = 'website';
-        addSystemMessage(`Website content extracted (${content.length} characters)`);
+        addSystemMessage(`✅ Website content extracted (${content.length} characters)`);
       }
 
+      // Add context about this URL for future reference
       const analysis = await window.electronAPI.analyzeContent(content, contentType);
       addMessage('ai', analysis);
-
-      setUrlInput('');
     } catch (error) {
       addMessage('ai', `Error analyzing URL: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
@@ -273,141 +354,92 @@ function App() {
         </div>
       </div>
 
-      <div className="tabs">
-        <button
-          className={`tab ${activeTab === 'chat' ? 'active' : ''}`}
-          onClick={() => setActiveTab('chat')}
-        >
-          💬 Chat
-        </button>
-        <button
-          className={`tab ${activeTab === 'screenshot' ? 'active' : ''}`}
-          onClick={() => setActiveTab('screenshot')}
-        >
-          📸 Screenshots ({screenshots.length})
-        </button>
-        <button
-          className={`tab ${activeTab === 'content' ? 'active' : ''}`}
-          onClick={() => setActiveTab('content')}
-        >
-          🌐 Content Analysis
-        </button>
-      </div>
+      <div className="unified-chat-container">
+        {/* Quick Actions Bar */}
+        <div className="quick-actions">
+          <button
+            onClick={handleTakeScreenshot}
+            disabled={isLoading}
+            className="action-btn screenshot-btn"
+            title="Take Screenshot (Ctrl+H)"
+          >
+            📸 Screenshot
+          </button>
+          <button
+            onClick={handleAnalyzeLatestScreenshot}
+            disabled={isLoading || screenshots.length === 0}
+            className="action-btn analyze-btn"
+            title="Analyze Latest Screenshot"
+          >
+            🔍 Analyze Latest
+          </button>
+          <button
+            onClick={clearScreenshots}
+            disabled={isLoading}
+            className="action-btn clear-btn"
+            title="Clear Screenshots (Ctrl+R)"
+          >
+            🗑️ Clear ({screenshots.length})
+          </button>
+        </div>
 
-      <div className="tab-content">
-        {activeTab === 'chat' && (
-          <div className="chat-container">
-            <div className="messages">
-              {messages.map((message) => (
-                <div key={message.id} className={`message ${message.type}`}>
-                  <div className="message-content">{message.content}</div>
-                  <div className="message-time">
-                    {message.timestamp.toLocaleTimeString()}
-                  </div>
-                </div>
-              ))}
-              {isLoading && (
-                <div className="message ai loading">
-                  <div className="message-content">AI is thinking...</div>
-                </div>
-              )}
-              <div ref={messagesEndRef} />
-            </div>
-
-            <div className="chat-input">
-              <input
-                ref={chatInputRef}
-                type="text"
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyPress={(e) => handleKeyPress(e, handleSendMessage)}
-                placeholder="Type your message... (Enter to send)"
-                disabled={isLoading}
-              />
-              <button
-                onClick={handleSendMessage}
-                disabled={isLoading || !inputValue.trim()}
-                className="send-btn"
-              >
-                Send
-              </button>
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'screenshot' && (
-          <div className="screenshot-container">
-            <div className="screenshot-controls">
-              <button onClick={handleTakeScreenshot} disabled={isLoading} className="action-btn">
-                📸 Take Screenshot (Ctrl+H)
-              </button>
-              <button
-                onClick={handleAnalyzeLatestScreenshot}
-                disabled={isLoading || screenshots.length === 0}
-                className="action-btn"
-              >
-                🔍 Analyze Latest
-              </button>
-              <button onClick={clearScreenshots} disabled={isLoading} className="action-btn danger">
-                🗑️ Clear All (Ctrl+R)
-              </button>
-            </div>
-
-            <div className="screenshots-grid">
-              {screenshots.length === 0 ? (
-                <div className="empty-state">
-                  <p>No screenshots captured yet</p>
-                  <p>Press Ctrl+H or click the button above to capture</p>
-                </div>
-              ) : (
-                screenshots.map((screenshot, index) => (
-                  <div key={screenshot.timestamp} className="screenshot-item">
-                    <img
-                      src={screenshot.dataURL}
-                      alt={`Screenshot ${index + 1}`}
-                      className="screenshot-thumbnail"
-                    />
-                    <div className="screenshot-info">
-                      <small>{new Date(screenshot.timestamp).toLocaleString()}</small>
+        {/* Chat Messages */}
+        <div className="chat-container">
+          <div className="messages">
+            {messages.map((message) => (
+              <div key={message.id} className={`message ${message.type}`}>
+                <div className="message-content">
+                  {message.type === 'screenshot' && message.metadata?.screenshotData && (
+                    <div className="screenshot-preview">
+                      <img
+                        src={message.metadata.screenshotData}
+                        alt="Screenshot"
+                        className="screenshot-thumbnail-inline"
+                      />
                     </div>
-                  </div>
-                ))
-              )}
-            </div>
+                  )}
+                  {message.type === 'url' && message.metadata?.url && (
+                    <div className="url-preview">
+                      🔗 <a href={message.metadata.url} target="_blank" rel="noopener noreferrer">
+                        {message.metadata.url}
+                      </a>
+                    </div>
+                  )}
+                  <div className="message-text">{message.content}</div>
+                </div>
+                <div className="message-time">
+                  {message.timestamp.toLocaleTimeString()}
+                </div>
+              </div>
+            ))}
+            {isLoading && (
+              <div className="message ai loading">
+                <div className="message-content">🤔 AI is thinking...</div>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
           </div>
-        )}
 
-        {activeTab === 'content' && (
-          <div className="content-container">
-            <div className="url-input">
-              <input
-                type="text"
-                value={urlInput}
-                onChange={(e) => setUrlInput(e.target.value)}
-                onKeyPress={(e) => handleKeyPress(e, handleAnalyzeUrl)}
-                placeholder="Enter URL (website or video)..."
-                disabled={isLoading}
-              />
-              <button
-                onClick={handleAnalyzeUrl}
-                disabled={isLoading || !urlInput.trim()}
-                className="action-btn"
-              >
-                🔍 Analyze
-              </button>
-            </div>
-
-            <div className="content-info">
-              <h3>Supported Content Types:</h3>
-              <ul>
-                <li>🌐 Websites - Extract and analyze text content</li>
-                <li>📺 YouTube videos - Get title, description, and insights</li>
-                <li>🎬 Vimeo videos - Extract video metadata</li>
-                <li>📡 Other video platforms - Basic info extraction</li>
-              </ul>
-            </div>
+          {/* Chat Input */}
+          <div className="chat-input">
+            <input
+              ref={chatInputRef}
+              type="text"
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              onKeyPress={(e) => handleKeyPress(e, handleSendMessage)}
+              placeholder="Type a message, paste a URL, or ask about screenshots... (Enter to send)"
+              disabled={isLoading}
+            />
+            <button
+              onClick={handleSendMessage}
+              disabled={isLoading || !inputValue.trim()}
+              className="send-btn"
+            >
+              Send
+            </button>
           </div>
-        )}
+        </div>
       </div>
 
       <div className="status-bar">

@@ -432,36 +432,66 @@ ipcMain.handle('extract-video-info', async (_event, url) => {
 });
 ipcMain.handle('analyze-screenshot', async (_event, imageData) => {
     try {
-        // Use llava for screenshot analysis (vision model)
-        const visionModel = 'llava:latest';
-        const prompt = `Analyze this screenshot in detail. Describe:
+        // Check available models first
+        const modelsResponse = await axios.get(`${OLLAMA_BASE_URL}/api/tags`, { timeout: 5000 });
+        const availableModels = modelsResponse.data.models?.map((m) => m.name) || [];
+        // Try to find a vision model
+        const visionModels = ['llava:latest', 'llava:13b', 'llava:7b', 'llava', 'bakllava:latest', 'bakllava'];
+        const visionModel = visionModels.find(model => availableModels.includes(model));
+        if (!visionModel) {
+            console.error('No vision model available. Available models:', availableModels);
+            throw new Error('No vision model available for screenshot analysis. Please install llava with: ollama pull llava');
+        }
+        const prompt = `You are an AI assistant analyzing a screenshot. I have provided you with a screenshot image. Please analyze it and provide a detailed response covering:
+
 1. What type of interface or application is shown
-2. Key UI elements and their layout
+2. Key UI elements and their layout  
 3. Any text content visible
 4. Potential usability issues or improvements
 5. Overall design and functionality assessment
 
-Provide a comprehensive analysis of what you observe.`;
-        // Extract base64 data from data URL
+Be specific and actionable in your analysis. This is a real screenshot that I have captured.`;
+        // Extract base64 data from data URL (remove data:image/png;base64, prefix)
         const base64Data = imageData.includes(',') ? imageData.split(',')[1] : imageData;
         console.log(`Analyzing screenshot with vision model: ${visionModel}`);
+        console.log(`Image data length: ${base64Data.length} characters`);
         const response = await axios.post(`${OLLAMA_BASE_URL}/api/generate`, {
             model: visionModel,
             prompt: prompt,
             images: [base64Data],
             stream: false,
             options: {
-                temperature: 0.7,
-                num_predict: 2000
+                temperature: 0.3, // Lower temperature for more focused analysis
+                num_predict: 1500
             }
         }, {
-            timeout: 90000, // Longer timeout for vision analysis
+            timeout: 120000, // 2 minute timeout for vision analysis
             headers: {
                 'Content-Type': 'application/json'
             }
         });
         if (response.data && response.data.response) {
-            return response.data.response;
+            // Check if the response seems like a proper analysis
+            const responseText = response.data.response;
+            if (responseText.toLowerCase().includes('upload') || responseText.toLowerCase().includes('please provide')) {
+                console.warn('Vision model seems to not see the image, retrying...');
+                // Retry once with a different prompt
+                const retryPrompt = `I have uploaded a screenshot image. Analyze this image and describe what you see in detail.`;
+                const retryResponse = await axios.post(`${OLLAMA_BASE_URL}/api/generate`, {
+                    model: visionModel,
+                    prompt: retryPrompt,
+                    images: [base64Data],
+                    stream: false,
+                    options: {
+                        temperature: 0.1,
+                        num_predict: 1000
+                    }
+                }, { timeout: 60000 });
+                if (retryResponse.data && retryResponse.data.response) {
+                    return retryResponse.data.response;
+                }
+            }
+            return responseText;
         }
         else {
             throw new Error('Invalid response from vision model');
@@ -469,18 +499,7 @@ Provide a comprehensive analysis of what you observe.`;
     }
     catch (error) {
         console.error('Error analyzing screenshot with vision model:', error);
-        // Fallback to text-based analysis
-        const fallbackPrompt = `A screenshot was captured but could not be analyzed with the vision model. 
-        Please provide a general framework for screenshot analysis covering:
-        
-        1. Interface Design Assessment
-        2. User Experience Evaluation
-        3. Content Organization Review
-        4. Accessibility Considerations
-        5. Common Issues to Look For
-        
-        Provide actionable insights for improving any user interface.`;
-        return await callOllamaAPI(fallbackPrompt);
+        throw new Error(`Screenshot analysis failed: ${error instanceof Error ? error.message : 'Unknown error'}. Make sure llava model is installed: ollama pull llava`);
     }
 });
 ipcMain.handle('analyze-content', async (_event, content, contentType) => {
@@ -504,15 +523,45 @@ ipcMain.handle('chat-with-ai', async (_event, message, context) => {
             throw new Error('Ollama server not available');
         }
     }
-    const prompt = context
-        ? `Context: ${context}
+    const systemPrompt = `You are an AI Assistant Pro - a helpful desktop assistant that can analyze screenshots, videos, and websites. You have access to the following capabilities:
+
+1. Screenshot analysis using vision models
+2. Website content extraction and analysis  
+3. YouTube and video content analysis
+4. Contextual conversation based on previous interactions
+
+You should:
+- Provide detailed, helpful responses
+- Reference previous screenshots or URLs when relevant  
+- Ask clarifying questions when needed
+- Maintain conversation context across interactions
+- Be concise but comprehensive in your analysis
+- When users ask about screenshots, let them know they can be more specific about what they want to know
+
+Guidelines for screenshot analysis:
+- If users ask general questions about "what you see" or "analyze this", provide a comprehensive overview
+- If users ask specific questions, focus on those aspects
+- Always be helpful and descriptive in your analysis
+
+`;
+    let prompt = '';
+    if (context) {
+        prompt = `${systemPrompt}
+
+Conversation Context:
+${context}
+
+Current User Message: ${message}
+
+AI Assistant Response:`;
+    }
+    else {
+        prompt = `${systemPrompt}
 
 User: ${message}
 
-AI Assistant:`
-        : `User: ${message}
-
-AI Assistant:`;
+AI Assistant Response:`;
+    }
     return await callOllamaAPI(prompt);
 });
 // App event handlers

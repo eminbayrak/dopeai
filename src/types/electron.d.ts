@@ -23,12 +23,16 @@ declare global {
             extractVideoInfo: (url: string) => Promise<{ title: string; description: string; transcript?: string; }>;
             analyzeScreenshot: (imageData: string) => Promise<string>;
             analyzeContent: (content: string, contentType: 'website' | 'video') => Promise<string>;
-            chatWithAI: (message: string, context?: string) => Promise<string>;
+            chatWithAI: (message: string, context?: string, latestScreenshot?: string) => Promise<string>;
+            cancelAllProcesses: () => Promise<boolean>;
+            testIPC: () => Promise<string>;
             onScreenshotCaptured: (callback: (data: ScreenshotData) => void) => void;
             onScreenshotsCleared: (callback: () => void) => void;
             onWindowResized: (callback: (isExpanded: boolean) => void) => void;
             onMouseInteractionChanged: (callback: (enabled: boolean) => void) => void;
+            onProcessesCancelled: (callback: () => void) => void;
             removeAllListeners: (channel: string) => void;
+            on: (channel: string, callback: (...args: unknown[]) => void) => void;
         };
     }
 }

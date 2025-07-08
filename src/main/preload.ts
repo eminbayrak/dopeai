@@ -27,7 +27,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     analyzeScreenshot: (imageData: string) => ipcRenderer.invoke('analyze-screenshot', imageData),
     analyzeContent: (content: string, contentType: 'website' | 'video') =>
         ipcRenderer.invoke('analyze-content', content, contentType),
-    chatWithAI: (message: string, context?: string) => ipcRenderer.invoke('chat-with-ai', message, context),
+    chatWithAI: (message: string, context?: string, latestScreenshot?: string) =>
+        ipcRenderer.invoke('chat-with-ai', message, context, latestScreenshot),
+    cancelAllProcesses: () => ipcRenderer.invoke('cancel-all-processes'),
+    testIPC: () => ipcRenderer.invoke('test-ipc'),
 
     // Event listeners
     onScreenshotCaptured: (callback: (data: ScreenshotData) => void) => {
@@ -45,9 +48,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
         // @ts-expect-error - ipcRenderer event handler type mismatch
         ipcRenderer.on('mouse-interaction-changed', (_event, enabled) => callback(enabled));
     },
+    onProcessesCancelled: (callback: () => void) => {
+        ipcRenderer.on('processes-cancelled', () => callback());
+    },
 
     // Remove event listeners
     removeAllListeners: (channel: string) => {
         ipcRenderer.removeAllListeners(channel);
+    },
+
+    // General event listener for flexibility
+    on: (channel: string, callback: (...args: unknown[]) => void) => {
+        // @ts-expect-error - ipcRenderer event handler type mismatch
+        ipcRenderer.on(channel, (_event, ...args) => callback(...args));
     }
 });

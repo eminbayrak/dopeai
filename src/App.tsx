@@ -33,6 +33,7 @@ function App() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
+  const initializedRef = useRef(false);
 
   useEffect(() => {
     const addSystemMessage = (content: string) => {
@@ -51,8 +52,18 @@ function App() {
     // Set up event listeners
     window.electronAPI.onScreenshotCaptured((data: ScreenshotData) => {
       setScreenshots(prev => [...prev, data]);
-      // Show a subtle notification instead of a system message
-      addSystemMessage(`📸 Screenshot captured (${new Date(data.timestamp).toLocaleTimeString()}) - Ask me about it!`);
+
+      // Add screenshot as a visual message in chat
+      const screenshotMessage: Message = {
+        id: Date.now().toString(),
+        type: 'screenshot',
+        content: `📸 Screenshot captured`,
+        timestamp: new Date(),
+        metadata: {
+          screenshotData: data.dataURL
+        }
+      };
+      setMessages(prev => [...prev, screenshotMessage]);
     });
 
     window.electronAPI.onScreenshotsCleared(() => {
@@ -68,17 +79,33 @@ function App() {
       setWindowState(prev => ({ ...prev, isMouseInteractionEnabled: enabled }));
     });
 
-    // Initial welcome message
-    addSystemMessage(`🚀 AI Assistant Pro initialized!
+    // Handle process cancellation
+    window.electronAPI.onProcessesCancelled(() => {
+      setIsLoading(false);
+      setConnectionStatus('connected');
+      const message: Message = {
+        id: Date.now().toString(),
+        type: 'system',
+        content: '⏹️ All processes cancelled',
+        timestamp: new Date()
+      };
+      setMessages(prev => [...prev, message]);
+    });
+
+    // Initial welcome message - only show once
+    if (!initializedRef.current) {
+      addSystemMessage(`🚀 AI Assistant Pro initialized!
 
 📋 How to use:
-• 📸 Capture: Ctrl+H or click Screenshot button (silent capture)
-• � Analyze: Ask "what do you see?" or "analyze this screenshot"
+• 📸 Capture: Ctrl+H or click Screenshot button
+• 💬 Chat: Ask anything - I can see your screenshots automatically!
 • 🌐 URLs: Paste any YouTube/website URL for analysis
-• � Context: I remember our conversation and screenshots
-• 🗑️ Clear: Ctrl+R to clear screenshots
+• 🔄 Context: I remember our conversation and screenshots
+• ⏹️ Cancel: Ctrl+R to cancel all processes and clear screenshots
 
-Just chat naturally - I'll help you with screenshots, videos, and more!`);
+Screenshots appear as thumbnails and are automatically included in our conversation!`);
+      initializedRef.current = true;
+    }
 
     return () => {
       // Cleanup listeners
@@ -86,6 +113,7 @@ Just chat naturally - I'll help you with screenshots, videos, and more!`);
       window.electronAPI.removeAllListeners('screenshots-cleared');
       window.electronAPI.removeAllListeners('window-resized');
       window.electronAPI.removeAllListeners('mouse-interaction-changed');
+      window.electronAPI.removeAllListeners('processes-cancelled');
     };
   }, []);
 
@@ -156,47 +184,64 @@ Just chat naturally - I'll help you with screenshots, videos, and more!`);
   };
 
   const handleSendMessage = async () => {
-    if (!inputValue.trim() || isLoading) return;
-
     const userMessage = inputValue.trim();
+    const hasScreenshot = screenshots.length > 0;
+
+    // Allow sending if there's either text or a screenshot
+    if ((!userMessage && !hasScreenshot) || isLoading) return;
+
     setInputValue('');
 
     // Check if this is a URL
-    const urlRegex = /(https?:\/\/[^\s]+)/g;
-    const urls = userMessage.match(urlRegex);
+    if (userMessage) {
+      const urlRegex = /(https?:\/\/[^\s]+)/g;
+      const urls = userMessage.match(urlRegex);
 
-    if (urls && urls.length > 0) {
-      // Handle URL analysis
-      await handleAnalyzeUrl(urls[0], userMessage);
-      return;
+      if (urls && urls.length > 0) {
+        // Handle URL analysis
+        await handleAnalyzeUrl(urls[0], userMessage);
+        return;
+      }
     }
 
-    addMessage('user', userMessage);
+    // Add user message if there is text
+    if (userMessage) {
+      addMessage('user', userMessage);
+    }
+
     setIsLoading(true);
 
     try {
-      // Check if the message is asking about screenshots
-      const askingAboutScreenshots = userMessage.toLowerCase().includes('screenshot') ||
-        userMessage.toLowerCase().includes('image') ||
-        userMessage.toLowerCase().includes('see') ||
-        userMessage.toLowerCase().includes('analyze') ||
-        userMessage.toLowerCase().includes('look');
+      // Build context for the AI
+      const context = buildChatContext();
 
-      if (screenshots.length > 0 && askingAboutScreenshots) {
-        // If asking about screenshots, analyze the latest one
-        const latestScreenshot = screenshots[screenshots.length - 1];
-        addMessage('screenshot', 'Analyzing screenshot...', {
-          screenshotData: latestScreenshot.dataURL
-        });
+      // Get the latest screenshot if available
+      const latestScreenshot = hasScreenshot ? screenshots[screenshots.length - 1].dataURL : undefined;
 
-        const response = await window.electronAPI.analyzeScreenshot(latestScreenshot.dataURL);
-        addMessage('ai', response);
-      } else {
-        // Regular chat with context
-        const context = buildChatContext();
-        const response = await window.electronAPI.chatWithAI(userMessage, context);
-        addMessage('ai', response);
+      // Debug logging
+      console.log('=== RENDERER DEBUG ===');
+      console.log('User message:', userMessage);
+      console.log('Has screenshot:', !!latestScreenshot);
+      console.log('Screenshots array length:', screenshots.length);
+      if (latestScreenshot) {
+        console.log('Screenshot data length:', latestScreenshot.length);
+        console.log('Screenshot prefix:', latestScreenshot.substring(0, 50));
       }
+
+      // Use appropriate message for AI
+      const messageForAI = userMessage || "Please analyze this screenshot and tell me what you see.";
+
+      console.log('About to call chatWithAI with:', {
+        message: messageForAI,
+        hasContext: !!context,
+        hasScreenshot: !!latestScreenshot
+      });
+
+      // Always include screenshot context if available
+      const response = await window.electronAPI.chatWithAI(messageForAI, context, latestScreenshot);
+
+      console.log('Received response from chatWithAI:', response.substring(0, 100));
+      addMessage('ai', response);
     } catch (error) {
       addMessage('ai', `Error: ${error instanceof Error ? error.message : 'Unknown error occurred'}`);
     } finally {
@@ -298,20 +343,27 @@ Just chat naturally - I'll help you with screenshots, videos, and more!`);
     }
   };
 
-  const clearScreenshots = async () => {
+  const cancelAllProcesses = async () => {
     try {
-      await window.electronAPI.clearScreenshots();
+      await window.electronAPI.cancelAllProcesses();
     } catch (error) {
-      addSystemMessage(`Error clearing screenshots: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      addSystemMessage(`Error cancelling processes: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   };
 
   const checkOllamaConnection = async () => {
     setConnectionStatus('checking');
     try {
+      // Test IPC first
+      console.log('Testing IPC...');
+      const ipcTest = await window.electronAPI.testIPC();
+      console.log('IPC test result:', ipcTest);
+
+      console.log('Testing chatWithAI...');
       await window.electronAPI.chatWithAI('test', undefined);
       setConnectionStatus('connected');
-    } catch {
+    } catch (error) {
+      console.error('Connection test failed:', error);
       setConnectionStatus('disconnected');
     }
   };
@@ -374,12 +426,12 @@ Just chat naturally - I'll help you with screenshots, videos, and more!`);
             🔍 Analyze Latest
           </button>
           <button
-            onClick={clearScreenshots}
+            onClick={cancelAllProcesses}
             disabled={isLoading}
             className="action-btn clear-btn"
-            title="Clear Screenshots (Ctrl+R)"
+            title="Cancel All Processes & Clear Screenshots (Ctrl+R)"
           >
-            🗑️ Clear ({screenshots.length})
+            ⏹️ Cancel ({screenshots.length})
           </button>
         </div>
 
@@ -428,12 +480,12 @@ Just chat naturally - I'll help you with screenshots, videos, and more!`);
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               onKeyPress={(e) => handleKeyPress(e, handleSendMessage)}
-              placeholder="Type a message, paste a URL, or ask about screenshots... (Enter to send)"
+              placeholder="Ask about screenshots, paste URLs, or just hit Send to analyze the latest screenshot..."
               disabled={isLoading}
             />
             <button
               onClick={handleSendMessage}
-              disabled={isLoading || !inputValue.trim()}
+              disabled={isLoading || (!inputValue.trim() && screenshots.length === 0)}
               className="send-btn"
             >
               Send

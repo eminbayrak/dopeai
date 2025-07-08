@@ -6,6 +6,7 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import youtubedl from 'youtube-dl-exec';
 import { fileURLToPath } from 'url';
+import Tesseract from 'tesseract.js';
 
 // ES module compatibility
 const __filename = fileURLToPath(import.meta.url);
@@ -20,9 +21,12 @@ let isExpanded = false;
 let isMouseInteractionEnabled = true; // Enable mouse by default
 const stealthMode = false; // Disable stealth mode by default
 
-// Define window dimensions
-const smallSize = { width: 520, height: 400 };
-const largeSize = { width: 1200, height: 800 };
+// Global abort controller for cancelling API calls
+let currentAbortController: AbortController | null = null;
+
+// Define window dimensions - ChitKode style
+const smallSize = { width: 400, height: 500 };
+const largeSize = { width: 800, height: 700 };
 
 // Ollama API configuration
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
@@ -34,6 +38,15 @@ const DEFAULT_MODEL = process.env.OLLAMA_MODEL || 'llama3.2';
 async function callOllamaAPI(prompt: string, model: string = DEFAULT_MODEL): Promise<string> {
     try {
         console.log(`Calling Ollama API with model: ${model}`);
+
+        // Cancel previous request if any
+        if (currentAbortController) {
+            currentAbortController.abort();
+        }
+
+        // Create a new abort controller for this request
+        currentAbortController = new AbortController();
+        const { signal } = currentAbortController;
 
         const response = await axios.post(`${OLLAMA_BASE_URL}/api/generate`, {
             model: model,
@@ -47,7 +60,8 @@ async function callOllamaAPI(prompt: string, model: string = DEFAULT_MODEL): Pro
             timeout: 60000,  // 60 second timeout
             headers: {
                 'Content-Type': 'application/json'
-            }
+            },
+            signal: signal // Attach the abort signal to the request
         });
 
         if (response.data && response.data.response) {
@@ -256,6 +270,23 @@ function clearScreenshots(): void {
 }
 
 /**
+ * Cancel all ongoing API calls and clear screenshots
+ */
+function cancelAllProcesses(): void {
+    if (currentAbortController) {
+        currentAbortController.abort();
+        currentAbortController = null;
+        console.log('All API calls cancelled');
+    }
+
+    // Clear screenshots as well
+    clearScreenshots();
+
+    // Notify renderer that processes were cancelled
+    mainWindow.webContents.send('processes-cancelled');
+}
+
+/**
  * Toggle window visibility
  */
 function toggleWindowVisibility(): void {
@@ -319,13 +350,13 @@ async function createWindow(): Promise<void> {
             preload: path.join(__dirname, 'preload.js')
         },
         frame: false,
-        transparent: true,
-        backgroundColor: '#00000000',
+        transparent: false,
+        backgroundColor: '#141414',
         alwaysOnTop: true,
-        skipTaskbar: true,
+        skipTaskbar: false,
         resizable: true,
         maximizable: false,
-        minimizable: false,
+        minimizable: true,
         show: false,
         titleBarStyle: 'hidden'
     });
@@ -414,10 +445,10 @@ function registerGlobalShortcuts(): void {
         captureScreenshot();
     });
 
-    // Clear screenshots shortcut
+    // Clear screenshots shortcut - now cancels all processes
     globalShortcut.register('CommandOrControl+R', () => {
-        console.log('Clear screenshots shortcut pressed');
-        clearScreenshots();
+        console.log('Cancel all processes shortcut pressed');
+        cancelAllProcesses();
     });
 
     // Toggle visibility shortcut
@@ -600,9 +631,15 @@ ${content}`;
     return await callOllamaAPI(prompt);
 });
 
-ipcMain.handle('chat-with-ai', async (_event, message: string, context?: string) => {
+ipcMain.handle('chat-with-ai', async (_event, message: string, context?: string, latestScreenshot?: string) => {
+    console.log('🔴🔴🔴 CHAT-WITH-AI HANDLER CALLED! 🔴🔴🔴');
+    console.log('🔴🔴🔴 Message received:', message);
+    console.log('🔴🔴🔴 Has context:', !!context);
+    console.log('🔴🔴🔴 Has screenshot:', !!latestScreenshot);
+
     // Handle connection test
     if (message === 'test') {
+        console.log('🔴🔴🔴 Connection test requested');
         try {
             await axios.get(`${OLLAMA_BASE_URL}/api/tags`, { timeout: 3000 });
             return 'Connection successful';
@@ -611,6 +648,129 @@ ipcMain.handle('chat-with-ai', async (_event, message: string, context?: string)
         }
     }
 
+    // Debug logging
+    console.log('=== CHAT WITH AI DEBUG ===');
+    console.log('Message:', message);
+    console.log('Context length:', context ? context.length : 'no context');
+    console.log('Has screenshot:', !!latestScreenshot);
+    if (latestScreenshot) {
+        console.log('Screenshot data length:', latestScreenshot.length);
+        console.log('Screenshot starts with:', latestScreenshot.substring(0, 50));
+    }
+
+    // Check if we have a screenshot to analyze
+    if (latestScreenshot) {
+        console.log('Processing screenshot with vision model...');
+        try {
+            // Check available models first (for coding model selection)
+            const modelsResponse = await axios.get(`${OLLAMA_BASE_URL}/api/tags`, { timeout: 5000 });
+            const availableModels = modelsResponse.data.models?.map((m: { name: string; }) => m.name) || [];
+            console.log('Available models:', availableModels);
+
+            // STEP 1: Use OCR for accurate text extraction (no vision model needed)
+            const base64Data = latestScreenshot.includes(',') ? latestScreenshot.split(',')[1] : latestScreenshot;
+
+            console.log(`Using OCR for text extraction from screenshot`);
+            console.log(`Image data length: ${base64Data.length} characters`);
+
+            // Cancel previous request if any
+            if (currentAbortController) {
+                currentAbortController.abort();
+            }
+
+            // Create a new abort controller for this request
+            currentAbortController = new AbortController();
+            const { signal } = currentAbortController;
+
+            console.log('Step 1: Extracting text using OCR...');
+
+            try {
+                // Convert base64 to buffer for OCR
+                const imageBuffer = Buffer.from(base64Data, 'base64');
+
+                // Use Tesseract.js for OCR
+                const { data: { text } } = await Tesseract.recognize(imageBuffer, 'eng', {
+                    logger: m => console.log(`OCR Progress: ${m.status} ${m.progress || ''}`)
+                });
+
+                const extractedText = text.trim();
+                console.log('OCR extraction completed');
+                console.log('Extracted text:', extractedText);
+
+                if (extractedText && extractedText.length > 10) {
+                    // STEP 2: Use a better text model to solve the coding problem
+                    console.log('Step 2: Solving coding problem with text model...');
+
+                    // Choose best available model for coding
+                    const codingModels = ['deepseek-coder:6.7b-instruct', 'codegemma:7b-instruct', 'llama3.1:8b', 'phi3:latest'];
+                    const availableModels = modelsResponse.data.models?.map((m: { name: string; }) => m.name) || [];
+                    const codingModel = codingModels.find(model => availableModels.includes(model)) || DEFAULT_MODEL;
+
+                    console.log(`Using coding model: ${codingModel}`);
+
+                    const codingPrompt = `You are an expert programmer. Based on the extracted text from a screenshot, solve the coding problem.
+
+EXTRACTED TEXT FROM SCREENSHOT:
+${extractedText}
+
+USER QUESTION: ${message}
+
+INSTRUCTIONS:
+1. Analyze the extracted text to identify the coding problem
+2. If it's a coding challenge (LeetCode, HackerRank, etc.), provide a complete solution
+3. If it's a function signature, complete the implementation
+4. If it's an error, provide the corrected code
+5. If no clear coding problem is found, explain what you found
+
+RESPONSE FORMAT:
+Problem: [brief description]
+Solution:
+\`\`\`[language]
+[complete working code]
+\`\`\`
+Explanation: [brief approach and complexity]`;
+
+                    const codeResponse = await axios.post(`${OLLAMA_BASE_URL}/api/generate`, {
+                        model: codingModel,
+                        prompt: codingPrompt,
+                        stream: false,
+                        options: {
+                            temperature: 0.3,
+                            num_predict: 2000
+                        }
+                    }, {
+                        timeout: 60000,
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        signal: signal
+                    });
+
+                    if (codeResponse.data && codeResponse.data.response) {
+                        const codeResult = codeResponse.data.response;
+                        console.log('Code solution generated:', codeResult);
+                        return codeResult;
+                    } else {
+                        console.warn('No response from coding model, falling back to extracted text');
+                        return `I extracted this text from the screenshot:\n\n${extractedText}\n\nPlease let me know what specific coding problem you'd like me to solve based on this content.`;
+                    }
+                } else {
+                    console.warn('No meaningful text extracted from OCR');
+                    return 'I was unable to extract meaningful text from the screenshot. Please try again or describe the coding problem you\'d like help with.';
+                }
+            } catch (ocrError) {
+                console.error('OCR extraction failed:', ocrError);
+                return 'I encountered an error while extracting text from the screenshot. Please try again or describe the coding problem you\'d like help with.';
+            }
+        } catch (error) {
+            console.error('Error using OCR for chat:', error);
+            // Fall back to text-only chat
+        }
+    } else {
+        console.log('No screenshot provided, using text-only chat');
+    }
+
+    // Fallback to text-only chat when no screenshot or vision model fails
     const systemPrompt = `You are an AI Assistant Pro - a helpful desktop assistant that can analyze screenshots, videos, and websites. You have access to the following capabilities:
 
 1. Screenshot analysis using vision models
@@ -652,6 +812,17 @@ AI Assistant Response:`;
     }
 
     return await callOllamaAPI(prompt);
+});
+
+ipcMain.handle('cancel-all-processes', () => {
+    cancelAllProcesses();
+    return true;
+});
+
+// Test handler to verify IPC is working
+ipcMain.handle('test-ipc', () => {
+    console.log('🟢 TEST-IPC HANDLER CALLED! 🟢');
+    return 'IPC is working!';
 });
 
 // App event handlers

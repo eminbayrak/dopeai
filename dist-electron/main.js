@@ -16,9 +16,11 @@ let isWindowVisible = true;
 let isExpanded = false;
 let isMouseInteractionEnabled = true; // Enable mouse by default
 const stealthMode = false; // Disable stealth mode by default
-// Define window dimensions
-const smallSize = { width: 520, height: 400 };
-const largeSize = { width: 1200, height: 800 };
+// Global abort controller for cancelling API calls
+let currentAbortController = null;
+// Define window dimensions - ChitKode style
+const smallSize = { width: 400, height: 500 };
+const largeSize = { width: 800, height: 700 };
 // Ollama API configuration
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
 const DEFAULT_MODEL = process.env.OLLAMA_MODEL || 'llama3.2';
@@ -28,6 +30,13 @@ const DEFAULT_MODEL = process.env.OLLAMA_MODEL || 'llama3.2';
 async function callOllamaAPI(prompt, model = DEFAULT_MODEL) {
     try {
         console.log(`Calling Ollama API with model: ${model}`);
+        // Cancel previous request if any
+        if (currentAbortController) {
+            currentAbortController.abort();
+        }
+        // Create a new abort controller for this request
+        currentAbortController = new AbortController();
+        const { signal } = currentAbortController;
         const response = await axios.post(`${OLLAMA_BASE_URL}/api/generate`, {
             model: model,
             prompt: prompt,
@@ -40,7 +49,8 @@ async function callOllamaAPI(prompt, model = DEFAULT_MODEL) {
             timeout: 60000, // 60 second timeout
             headers: {
                 'Content-Type': 'application/json'
-            }
+            },
+            signal: signal // Attach the abort signal to the request
         });
         if (response.data && response.data.response) {
             return response.data.response;
@@ -213,6 +223,20 @@ function clearScreenshots() {
     }
 }
 /**
+ * Cancel all ongoing API calls and clear screenshots
+ */
+function cancelAllProcesses() {
+    if (currentAbortController) {
+        currentAbortController.abort();
+        currentAbortController = null;
+        console.log('All API calls cancelled');
+    }
+    // Clear screenshots as well
+    clearScreenshots();
+    // Notify renderer that processes were cancelled
+    mainWindow.webContents.send('processes-cancelled');
+}
+/**
  * Toggle window visibility
  */
 function toggleWindowVisibility() {
@@ -270,13 +294,13 @@ async function createWindow() {
             preload: path.join(__dirname, 'preload.js')
         },
         frame: false,
-        transparent: true,
-        backgroundColor: '#00000000',
+        transparent: false,
+        backgroundColor: '#141414',
         alwaysOnTop: true,
-        skipTaskbar: true,
+        skipTaskbar: false,
         resizable: true,
         maximizable: false,
-        minimizable: false,
+        minimizable: true,
         show: false,
         titleBarStyle: 'hidden'
     });
@@ -353,10 +377,10 @@ function registerGlobalShortcuts() {
         console.log('Screenshot shortcut pressed');
         captureScreenshot();
     });
-    // Clear screenshots shortcut
+    // Clear screenshots shortcut - now cancels all processes
     globalShortcut.register('CommandOrControl+R', () => {
-        console.log('Clear screenshots shortcut pressed');
-        clearScreenshots();
+        console.log('Cancel all processes shortcut pressed');
+        cancelAllProcesses();
     });
     // Toggle visibility shortcut
     globalShortcut.register('CommandOrControl+B', () => {
@@ -512,9 +536,14 @@ ${content}`
 ${content}`;
     return await callOllamaAPI(prompt);
 });
-ipcMain.handle('chat-with-ai', async (_event, message, context) => {
+ipcMain.handle('chat-with-ai', async (_event, message, context, latestScreenshot) => {
+    console.log('🔴🔴🔴 CHAT-WITH-AI HANDLER CALLED! 🔴🔴🔴');
+    console.log('🔴🔴🔴 Message received:', message);
+    console.log('🔴🔴🔴 Has context:', !!context);
+    console.log('🔴🔴🔴 Has screenshot:', !!latestScreenshot);
     // Handle connection test
     if (message === 'test') {
+        console.log('🔴🔴🔴 Connection test requested');
         try {
             await axios.get(`${OLLAMA_BASE_URL}/api/tags`, { timeout: 3000 });
             return 'Connection successful';
@@ -523,6 +552,189 @@ ipcMain.handle('chat-with-ai', async (_event, message, context) => {
             throw new Error('Ollama server not available');
         }
     }
+    // Debug logging
+    console.log('=== CHAT WITH AI DEBUG ===');
+    console.log('Message:', message);
+    console.log('Context length:', context ? context.length : 'no context');
+    console.log('Has screenshot:', !!latestScreenshot);
+    if (latestScreenshot) {
+        console.log('Screenshot data length:', latestScreenshot.length);
+        console.log('Screenshot starts with:', latestScreenshot.substring(0, 50));
+    }
+    // Check if we have a screenshot to analyze
+    if (latestScreenshot) {
+        console.log('Processing screenshot with vision model...');
+        try {
+            // Check available models first
+            const modelsResponse = await axios.get(`${OLLAMA_BASE_URL}/api/tags`, { timeout: 5000 });
+            const availableModels = modelsResponse.data.models?.map((m) => m.name) || [];
+            console.log('Available models:', availableModels);
+            // Try to find a vision model
+            const visionModels = ['llava:latest', 'llava:13b', 'llava:7b', 'llava', 'bakllava:latest', 'bakllava'];
+            const visionModel = visionModels.find(model => availableModels.includes(model));
+            console.log('Found vision model:', visionModel);
+            if (visionModel) {
+                // Use vision model for screenshot context
+                const base64Data = latestScreenshot.includes(',') ? latestScreenshot.split(',')[1] : latestScreenshot;
+                console.log(`Using vision model for chat: ${visionModel}`);
+                console.log(`Image data length: ${base64Data.length} characters`);
+                const systemPrompt = `You are an AI Assistant Pro analyzing a screenshot. Look carefully at the image and describe EXACTLY what you see without making assumptions.
+
+IMPORTANT: Only describe what is actually visible in the image. Do not hallucinate or imagine content that isn't there.
+
+User question: ${message}
+
+Based on the screenshot image provided, please:
+1. Read any text that is clearly visible
+2. Describe the interface/application shown
+3. Answer the user's question based on what you can actually see
+4. If there are programming problems or code visible, help solve them
+5. Be accurate and specific about what is actually shown
+
+Analyze the screenshot carefully and respond to: ${message}`;
+                // Cancel previous request if any
+                if (currentAbortController) {
+                    currentAbortController.abort();
+                }
+                // Create a new abort controller for this request
+                currentAbortController = new AbortController();
+                const { signal } = currentAbortController;
+                console.log('Sending request to vision model...');
+                const response = await axios.post(`${OLLAMA_BASE_URL}/api/generate`, {
+                    model: visionModel,
+                    prompt: systemPrompt,
+                    images: [base64Data],
+                    stream: false,
+                    options: {
+                        temperature: 0.7,
+                        num_predict: 2000
+                    }
+                }, {
+                    timeout: 120000,
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    signal: signal
+                });
+                console.log('Vision model response received');
+                console.log('Response status:', response.status);
+                console.log('Response data:', response.data);
+                if (response.data && response.data.response) {
+                    const responseText = response.data.response;
+                    console.log('Raw vision model response:', responseText);
+                    // Comprehensive hallucination detection
+                    const hallucinations = [
+                        'discord',
+                        'social media',
+                        'chat input field',
+                        'server name',
+                        'channel',
+                        'user inputs',
+                        'new messages',
+                        'multitasking',
+                        'i cannot see',
+                        'unable to see',
+                        'please provide',
+                        'upload',
+                        'no image',
+                        'cannot analyze',
+                        'appears to be a chat',
+                        'messaging platform',
+                        'social platform',
+                        'communication app',
+                        'typing indicator',
+                        'online status',
+                        'profile picture',
+                        'avatar',
+                        'friends list',
+                        'notification',
+                        'settings menu'
+                    ];
+                    const isLikelyHallucination = hallucinations.some(term => responseText.toLowerCase().includes(term.toLowerCase()));
+                    if (isLikelyHallucination) {
+                        console.warn('Detected possible hallucination, retrying with more specific prompt...');
+                        // First retry with very specific, direct prompt
+                        const directPrompt = `Look at this screenshot image. What text content can you read? List any visible text, code, or interface elements you can see. Be specific and only describe what is actually visible.`;
+                        const retryResponse = await axios.post(`${OLLAMA_BASE_URL}/api/generate`, {
+                            model: visionModel,
+                            prompt: directPrompt,
+                            images: [base64Data],
+                            stream: false,
+                            options: {
+                                temperature: 0.05, // Very low temperature for accuracy
+                                num_predict: 1500
+                            }
+                        }, {
+                            timeout: 90000,
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            signal: signal
+                        });
+                        if (retryResponse.data && retryResponse.data.response) {
+                            const retryText = retryResponse.data.response;
+                            console.log('Retry response:', retryText);
+                            // Check if retry is also hallucinating
+                            const stillHallucinating = hallucinations.some(term => retryText.toLowerCase().includes(term.toLowerCase()));
+                            if (stillHallucinating) {
+                                console.warn('Vision model still hallucinating, trying final fallback...');
+                                // Final attempt with minimal prompt
+                                const finalPrompt = `Read the text in this image. What does it say?`;
+                                const finalResponse = await axios.post(`${OLLAMA_BASE_URL}/api/generate`, {
+                                    model: visionModel,
+                                    prompt: finalPrompt,
+                                    images: [base64Data],
+                                    stream: false,
+                                    options: {
+                                        temperature: 0.01, // Extremely low temperature
+                                        num_predict: 800
+                                    }
+                                }, {
+                                    timeout: 60000,
+                                    headers: {
+                                        'Content-Type': 'application/json'
+                                    },
+                                    signal: signal
+                                });
+                                if (finalResponse.data && finalResponse.data.response) {
+                                    const finalText = finalResponse.data.response;
+                                    console.log('Final attempt response:', finalText);
+                                    // If still hallucinating, return a generic message
+                                    const finalHallucination = hallucinations.some(term => finalText.toLowerCase().includes(term.toLowerCase()));
+                                    if (finalHallucination) {
+                                        console.error('Vision model consistently hallucinating, returning generic response');
+                                        return 'I can see a screenshot but I\'m having trouble accurately analyzing its content. Could you describe what you\'re seeing or ask a specific question about it?';
+                                    }
+                                    return finalText;
+                                }
+                            }
+                            else {
+                                console.log('Retry successful, using retry response');
+                                return retryText;
+                            }
+                        }
+                    }
+                    console.log('Returning original vision model response');
+                    return responseText;
+                }
+                else {
+                    throw new Error('Invalid response from vision model');
+                }
+            }
+            else {
+                console.log('No vision model available, falling back to text-only chat');
+                console.log('Available models:', availableModels);
+            }
+        }
+        catch (error) {
+            console.error('Error using vision model for chat:', error);
+            // Fall back to text-only chat
+        }
+    }
+    else {
+        console.log('No screenshot provided, using text-only chat');
+    }
+    // Fallback to text-only chat when no screenshot or vision model fails
     const systemPrompt = `You are an AI Assistant Pro - a helpful desktop assistant that can analyze screenshots, videos, and websites. You have access to the following capabilities:
 
 1. Screenshot analysis using vision models
@@ -563,6 +775,15 @@ User: ${message}
 AI Assistant Response:`;
     }
     return await callOllamaAPI(prompt);
+});
+ipcMain.handle('cancel-all-processes', () => {
+    cancelAllProcesses();
+    return true;
+});
+// Test handler to verify IPC is working
+ipcMain.handle('test-ipc', () => {
+    console.log('🟢 TEST-IPC HANDLER CALLED! 🟢');
+    return 'IPC is working!';
 });
 // App event handlers
 app.whenReady().then(async () => {

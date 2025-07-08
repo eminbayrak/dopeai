@@ -176,11 +176,11 @@ Just chat naturally - I'll help you with screenshots, videos, and more!`);
 
     try {
       // Check if the message is asking about screenshots
-      const askingAboutScreenshots = userMessage.toLowerCase().includes('screenshot') || 
-                                   userMessage.toLowerCase().includes('image') ||
-                                   userMessage.toLowerCase().includes('see') ||
-                                   userMessage.toLowerCase().includes('analyze') ||
-                                   userMessage.toLowerCase().includes('look');
+      const askingAboutScreenshots = userMessage.toLowerCase().includes('screenshot') ||
+        userMessage.toLowerCase().includes('image') ||
+        userMessage.toLowerCase().includes('see') ||
+        userMessage.toLowerCase().includes('analyze') ||
+        userMessage.toLowerCase().includes('look');
 
       if (screenshots.length > 0 && askingAboutScreenshots) {
         // If asking about screenshots, analyze the latest one

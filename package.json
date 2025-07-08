@@ -1,0 +1,48 @@
+{
+  "name": "ai-assistant-pro",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "description": "AI Assistant Pro - Screenshot analysis, video/website content analysis with local LLM",
+  "author": "Your Name",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "electron": "electron dist-electron/main.js",
+    "electron-dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5179 && electron dist-electron/main.js -- --dev\"",
+    "build-electron": "tsc -p tsconfig.electron.json && tsc -p tsconfig.preload.json",
+    "dist": "npm run build && npm run build-electron && electron-builder",
+    "start": "npm run build-electron && npm run electron-dev",
+    "start-prod": "npm run build && npm run build-electron && npm run electron"
+  },
+  "dependencies": {
+    "@types/cheerio": "^0.22.35",
+    "axios": "^1.10.0",
+    "cheerio": "^1.1.0",
+    "dotenv": "^17.0.1",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "youtube-dl-exec": "^3.0.22"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.29.0",
+    "@types/node": "^24.0.10",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.5.2",
+    "concurrently": "^9.2.0",
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12",
+    "eslint": "^9.29.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.20",
+    "globals": "^16.2.0",
+    "typescript": "~5.8.3",
+    "typescript-eslint": "^8.34.1",
+    "vite": "^7.0.0",
+    "wait-on": "^8.0.3"
+  }
+}

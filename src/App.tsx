@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
+import { default as MarkdownRenderer } from './components/MarkdownRenderer';
 
 interface Message {
   id: string;
@@ -53,11 +54,11 @@ function App() {
     window.electronAPI.onScreenshotCaptured((data: ScreenshotData) => {
       setScreenshots(prev => [...prev, data]);
 
-      // Add screenshot as a visual message in chat
+      // Add screenshot as a visual message in chat (ChitKode style - screenshot ready for processing)
       const screenshotMessage: Message = {
         id: Date.now().toString(),
         type: 'screenshot',
-        content: `📸 Screenshot captured`,
+        content: `📸 Screenshot captured and ready for analysis`,
         timestamp: new Date(),
         metadata: {
           screenshotData: data.dataURL
@@ -94,16 +95,17 @@ function App() {
 
     // Initial welcome message - only show once
     if (!initializedRef.current) {
-      addSystemMessage(`🚀 AI Assistant Pro initialized!
+      addSystemMessage(`🚀 AI Assistant Pro initialized with ChitKode-style screenshot processing!
 
 📋 How to use:
 • 📸 Capture: Ctrl+H or click Screenshot button
-• 💬 Chat: Ask anything - I can see your screenshots automatically!
+• 💬 Chat: Type your question and click Send - I'll analyze any screenshots using OCR
+• 🔍 Analysis: Screenshots are processed using text extraction (OCR) when you send a message
 • 🌐 URLs: Paste any YouTube/website URL for analysis
-• 🔄 Context: I remember our conversation and screenshots
+• 🔄 Context: I remember our conversation history
 • ⏹️ Cancel: Ctrl+R to cancel all processes and clear screenshots
 
-Screenshots appear as thumbnails and are automatically included in our conversation!`);
+📌 Key difference: Screenshots are analyzed only when you click Send, not automatically!`);
       initializedRef.current = true;
     }
 
@@ -271,7 +273,11 @@ Screenshots appear as thumbnails and are automatically included in our conversat
         screenshotData: latestScreenshot.dataURL
       });
 
-      const response = await window.electronAPI.analyzeScreenshot(latestScreenshot.dataURL);
+      const response = await window.electronAPI.chatWithAI(
+        'Analyze this screenshot and provide insights about what you see.',
+        undefined,
+        latestScreenshot.dataURL
+      );
       addMessage('ai', response);
     } catch (error) {
       addMessage('ai', `Analysis error: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -457,7 +463,13 @@ Screenshots appear as thumbnails and are automatically included in our conversat
                       </a>
                     </div>
                   )}
-                  <div className="message-text">{message.content}</div>
+                  <div className="message-text">
+                    {message.type === 'ai' ? (
+                      <MarkdownRenderer content={message.content} />
+                    ) : (
+                      message.content
+                    )}
+                  </div>
                 </div>
                 <div className="message-time">
                   {message.timestamp.toLocaleTimeString()}

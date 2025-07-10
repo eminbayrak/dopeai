@@ -24,7 +24,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     callOllama: (prompt: string, model?: string) => ipcRenderer.invoke('call-ollama', prompt, model),
     extractWebsiteContent: (url: string) => ipcRenderer.invoke('extract-website-content', url),
     extractVideoInfo: (url: string) => ipcRenderer.invoke('extract-video-info', url),
-    analyzeScreenshot: (imageData: string) => ipcRenderer.invoke('analyze-screenshot', imageData),
     analyzeContent: (content: string, contentType: 'website' | 'video') =>
         ipcRenderer.invoke('analyze-content', content, contentType),
     chatWithAI: (message: string, context?: string, latestScreenshot?: string) =>

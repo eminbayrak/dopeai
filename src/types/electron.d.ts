@@ -21,7 +21,6 @@ declare global {
             callOllama: (prompt: string, model?: string) => Promise<string>;
             extractWebsiteContent: (url: string) => Promise<string>;
             extractVideoInfo: (url: string) => Promise<{ title: string; description: string; transcript?: string; }>;
-            analyzeScreenshot: (imageData: string) => Promise<string>;
             analyzeContent: (content: string, contentType: 'website' | 'video') => Promise<string>;
             chatWithAI: (message: string, context?: string, latestScreenshot?: string) => Promise<string>;
             cancelAllProcesses: () => Promise<boolean>;

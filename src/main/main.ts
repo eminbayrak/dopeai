@@ -540,85 +540,6 @@ ipcMain.handle('extract-video-info', async (_event, url: string) => {
     return await extractVideoInfo(url);
 });
 
-ipcMain.handle('analyze-screenshot', async (_event, imageData: string) => {
-    try {
-        // Check available models first
-        const modelsResponse = await axios.get(`${OLLAMA_BASE_URL}/api/tags`, { timeout: 5000 });
-        const availableModels = modelsResponse.data.models?.map((m: { name: string; }) => m.name) || [];
-
-        // Try to find a vision model
-        const visionModels = ['llava:latest', 'llava:13b', 'llava:7b', 'llava', 'bakllava:latest', 'bakllava'];
-        const visionModel = visionModels.find(model => availableModels.includes(model));
-
-        if (!visionModel) {
-            console.error('No vision model available. Available models:', availableModels);
-            throw new Error('No vision model available for screenshot analysis. Please install llava with: ollama pull llava');
-        }
-
-        const prompt = `You are an AI assistant analyzing a screenshot. I have provided you with a screenshot image. Please analyze it and provide a detailed response covering:
-
-1. What type of interface or application is shown
-2. Key UI elements and their layout  
-3. Any text content visible
-4. Potential usability issues or improvements
-5. Overall design and functionality assessment
-
-Be specific and actionable in your analysis. This is a real screenshot that I have captured.`;
-
-        // Extract base64 data from data URL (remove data:image/png;base64, prefix)
-        const base64Data = imageData.includes(',') ? imageData.split(',')[1] : imageData;
-
-        console.log(`Analyzing screenshot with vision model: ${visionModel}`);
-        console.log(`Image data length: ${base64Data.length} characters`);
-
-        const response = await axios.post(`${OLLAMA_BASE_URL}/api/generate`, {
-            model: visionModel,
-            prompt: prompt,
-            images: [base64Data],
-            stream: false,
-            options: {
-                temperature: 0.3, // Lower temperature for more focused analysis
-                num_predict: 1500
-            }
-        }, {
-            timeout: 120000, // 2 minute timeout for vision analysis
-            headers: {
-                'Content-Type': 'application/json'
-            }
-        });
-
-        if (response.data && response.data.response) {
-            // Check if the response seems like a proper analysis
-            const responseText = response.data.response;
-            if (responseText.toLowerCase().includes('upload') || responseText.toLowerCase().includes('please provide')) {
-                console.warn('Vision model seems to not see the image, retrying...');
-                // Retry once with a different prompt
-                const retryPrompt = `I have uploaded a screenshot image. Analyze this image and describe what you see in detail.`;
-                const retryResponse = await axios.post(`${OLLAMA_BASE_URL}/api/generate`, {
-                    model: visionModel,
-                    prompt: retryPrompt,
-                    images: [base64Data],
-                    stream: false,
-                    options: {
-                        temperature: 0.1,
-                        num_predict: 1000
-                    }
-                }, { timeout: 60000 });
-
-                if (retryResponse.data && retryResponse.data.response) {
-                    return retryResponse.data.response;
-                }
-            }
-            return responseText;
-        } else {
-            throw new Error('Invalid response from vision model');
-        }
-    } catch (error) {
-        console.error('Error analyzing screenshot with vision model:', error);
-        throw new Error(`Screenshot analysis failed: ${error instanceof Error ? error.message : 'Unknown error'}. Make sure llava model is installed: ollama pull llava`);
-    }
-});
-
 ipcMain.handle('analyze-content', async (_event, content: string, contentType: 'website' | 'video') => {
     const prompt = contentType === 'website'
         ? `Analyze this website content and provide a comprehensive summary, key insights, and main points:
@@ -658,21 +579,10 @@ ipcMain.handle('chat-with-ai', async (_event, message: string, context?: string,
         console.log('Screenshot starts with:', latestScreenshot.substring(0, 50));
     }
 
-    // Check if we have a screenshot to analyze
+    // Check if we have a screenshot to analyze - ChitKode style OCR processing
     if (latestScreenshot) {
-        console.log('Processing screenshot with vision model...');
+        console.log('Processing screenshot with OCR (ChitKode style)...');
         try {
-            // Check available models first (for coding model selection)
-            const modelsResponse = await axios.get(`${OLLAMA_BASE_URL}/api/tags`, { timeout: 5000 });
-            const availableModels = modelsResponse.data.models?.map((m: { name: string; }) => m.name) || [];
-            console.log('Available models:', availableModels);
-
-            // STEP 1: Use OCR for accurate text extraction (no vision model needed)
-            const base64Data = latestScreenshot.includes(',') ? latestScreenshot.split(',')[1] : latestScreenshot;
-
-            console.log(`Using OCR for text extraction from screenshot`);
-            console.log(`Image data length: ${base64Data.length} characters`);
-
             // Cancel previous request if any
             if (currentAbortController) {
                 currentAbortController.abort();
@@ -684,96 +594,109 @@ ipcMain.handle('chat-with-ai', async (_event, message: string, context?: string,
 
             console.log('Step 1: Extracting text using OCR...');
 
-            try {
-                // Convert base64 to buffer for OCR
-                const imageBuffer = Buffer.from(base64Data, 'base64');
+            // Convert base64 to buffer for OCR
+            const base64Data = latestScreenshot.includes(',') ? latestScreenshot.split(',')[1] : latestScreenshot;
+            const imageBuffer = Buffer.from(base64Data, 'base64');
 
-                // Use Tesseract.js for OCR
-                const { data: { text } } = await Tesseract.recognize(imageBuffer, 'eng', {
-                    logger: m => console.log(`OCR Progress: ${m.status} ${m.progress || ''}`)
+            // Use Tesseract.js for OCR (same as ChitKode)
+            const { data: { text } } = await Tesseract.recognize(imageBuffer, 'eng', {
+                logger: (m: { status: string; progress?: number; }) => {
+                    console.log(`OCR Progress: ${m.status} ${m.progress ? `(${Math.round(m.progress * 100)}%)` : ''}`);
+                }
+            });
+
+            const extractedText = text.trim();
+            console.log('OCR extraction completed');
+            console.log('Extracted text length:', extractedText.length);
+            console.log('Extracted text preview:', extractedText.substring(0, 200) + (extractedText.length > 200 ? '...' : ''));
+
+            if (extractedText && extractedText.length > 10) {
+                // Step 2: Use text model to analyze the extracted text with user's question
+                console.log('Step 2: Analyzing extracted text with AI...');
+
+                // Create a focused prompt for coding problems
+                const analysisPrompt = `I need help with a coding problem. Here's the extracted text from a screenshot:
+
+${extractedText.substring(0, 800)}${extractedText.length > 800 ? '...' : ''}
+
+User asked: "${message}"
+
+Please provide a complete solution for this coding problem. Focus on:
+1. Problem understanding
+2. Solution approach
+3. Working code
+4. Time/space complexity
+
+Response:`;
+
+                const response = await axios.post(`${OLLAMA_BASE_URL}/api/generate`, {
+                    model: DEFAULT_MODEL,
+                    prompt: analysisPrompt,
+                    stream: false,
+                    options: {
+                        temperature: 0.3,
+                        num_predict: 1500
+                    }
+                }, {
+                    timeout: 120000, // Increased to 2 minutes
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    signal: signal
                 });
 
-                const extractedText = text.trim();
-                console.log('OCR extraction completed');
-                console.log('Extracted text:', extractedText);
-
-                if (extractedText && extractedText.length > 10) {
-                    // STEP 2: Use a better text model to solve the coding problem
-                    console.log('Step 2: Solving coding problem with text model...');
-
-                    // Choose best available model for coding
-                    const codingModels = ['deepseek-coder:6.7b-instruct', 'codegemma:7b-instruct', 'llama3.1:8b', 'phi3:latest'];
-                    const availableModels = modelsResponse.data.models?.map((m: { name: string; }) => m.name) || [];
-                    const codingModel = codingModels.find(model => availableModels.includes(model)) || DEFAULT_MODEL;
-
-                    console.log(`Using coding model: ${codingModel}`);
-
-                    const codingPrompt = `You are an expert programmer. Based on the extracted text from a screenshot, solve the coding problem.
-
-EXTRACTED TEXT FROM SCREENSHOT:
-${extractedText}
-
-USER QUESTION: ${message}
-
-INSTRUCTIONS:
-1. Analyze the extracted text to identify the coding problem
-2. If it's a coding challenge (LeetCode, HackerRank, etc.), provide a complete solution
-3. If it's a function signature, complete the implementation
-4. If it's an error, provide the corrected code
-5. If no clear coding problem is found, explain what you found
-
-RESPONSE FORMAT:
-Problem: [brief description]
-Solution:
-\`\`\`[language]
-[complete working code]
-\`\`\`
-Explanation: [brief approach and complexity]`;
-
-                    const codeResponse = await axios.post(`${OLLAMA_BASE_URL}/api/generate`, {
-                        model: codingModel,
-                        prompt: codingPrompt,
-                        stream: false,
-                        options: {
-                            temperature: 0.3,
-                            num_predict: 2000
-                        }
-                    }, {
-                        timeout: 60000,
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        signal: signal
-                    });
-
-                    if (codeResponse.data && codeResponse.data.response) {
-                        const codeResult = codeResponse.data.response;
-                        console.log('Code solution generated:', codeResult);
-                        return codeResult;
-                    } else {
-                        console.warn('No response from coding model, falling back to extracted text');
-                        return `I extracted this text from the screenshot:\n\n${extractedText}\n\nPlease let me know what specific coding problem you'd like me to solve based on this content.`;
-                    }
+                if (response.data && response.data.response) {
+                    const result = response.data.response;
+                    console.log('AI analysis completed');
+                    return result;
                 } else {
-                    console.warn('No meaningful text extracted from OCR');
-                    return 'I was unable to extract meaningful text from the screenshot. Please try again or describe the coding problem you\'d like help with.';
+                    console.warn('No response from AI model, falling back to extracted text');
+                    return `I extracted this text from the screenshot:\n\n${extractedText.substring(0, 500)}${extractedText.length > 500 ? '...' : ''}\n\nRegarding your question: "${message}"\n\nPlease let me know if you need help with anything specific from this content.`;
                 }
-            } catch (ocrError) {
-                console.error('OCR extraction failed:', ocrError);
-                return 'I encountered an error while extracting text from the screenshot. Please try again or describe the coding problem you\'d like help with.';
+            } else {
+                console.warn('No meaningful text extracted from OCR');
+                return `I was unable to extract meaningful text from the screenshot. The image might contain mostly graphics, be unclear, or have very little text. Please try one of the following:
+
+1. Take a clearer screenshot
+2. Describe what you're seeing in the image
+3. Ask your question without referencing the screenshot
+
+Your question: "${message}"`;
             }
         } catch (error) {
             console.error('Error using OCR for chat:', error);
-            // Fall back to text-only chat
+
+            // More specific error handling
+            if (error instanceof Error) {
+                if (error.message.includes('timeout')) {
+                    return `⏱️ The AI took too long to respond. This might be because:
+1. The Ollama server is slow or overloaded
+2. The extracted text is complex to analyze
+3. The model needs more time to process
+
+Try asking a more specific question or restart Ollama with: \`ollama serve\``;
+                } else if (error.message.includes('ECONNREFUSED')) {
+                    return `🔌 Cannot connect to Ollama server. Please make sure:
+1. Ollama is running: \`ollama serve\`
+2. The server is accessible at: ${OLLAMA_BASE_URL}
+3. The model '${DEFAULT_MODEL}' is installed
+
+You can install the model with: \`ollama pull ${DEFAULT_MODEL}\``;
+                }
+            }
+
+            return `❌ Error processing screenshot: ${error instanceof Error ? error.message : 'Unknown error'}
+
+Please try again or describe what you're seeing in the image.`;
         }
     } else {
         console.log('No screenshot provided, using text-only chat');
     }
 
-    // Fallback to text-only chat when no screenshot or vision model fails
+    // Fallback to text-only chat when no screenshot
     const systemPrompt = `You are an AI Assistant Pro - a helpful desktop assistant that can analyze screenshots, videos, and websites. You have access to the following capabilities:
 
-1. Screenshot analysis using vision models
+1. Screenshot analysis using OCR text extraction
 2. Website content extraction and analysis  
 3. YouTube and video content analysis
 4. Contextual conversation based on previous interactions
@@ -784,12 +707,12 @@ You should:
 - Ask clarifying questions when needed
 - Maintain conversation context across interactions
 - Be concise but comprehensive in your analysis
-- When users ask about screenshots, let them know they can be more specific about what they want to know
+- When users ask about screenshots, let them know they can capture one using Ctrl+H
 
-Guidelines for screenshot analysis:
-- If users ask general questions about "what you see" or "analyze this", provide a comprehensive overview
-- If users ask specific questions, focus on those aspects
-- Always be helpful and descriptive in your analysis
+Guidelines:
+- Always be helpful and descriptive in your responses
+- If users mention screenshots but none are provided, guide them to take one
+- Focus on practical, actionable advice
 
 `;
 
